@@ -115,7 +115,6 @@ export class Driver {
         checksum += dataBuffer[i * 4 + 2] << 8;
         checksum += dataBuffer[i * 4 + 3];
 
-        checksum += dataBuffer[i * 4];
         checksum &= 0xffffffff;
 
         // for (let j=3; j>=1; j--) {
@@ -150,7 +149,6 @@ export class Driver {
         checksum += dataBuffer[i * 3 + 1] << 8;
         checksum += dataBuffer[i * 3 + 2] << 0;
 
-        checksum += dataBuffer[i * 3];
         checksum &= 0xffffff;
 
         // for (let j=3; j>=1; j--) {
