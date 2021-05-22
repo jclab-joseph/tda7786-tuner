@@ -1,5 +1,11 @@
 # TDA7786 Node.JS Driver
 
+# Status
+
+src/temp-develop.ts 파일을 실행하면 동작한다. 하지만 노이즈가 많이 끼고 소리가 매우 작게 들린다. 회로 문제일지도 모르겠지만 코드 문제에 더 가능성을 두고 있다. (회로가 문제 있을 가능성이 낮아서..)
+
+protocol에 대한 정보가 거의 없어서 명령에 대한 성공 실패도 알기 어렵다.
+
 # Requirements
 
 * Connect I2C
