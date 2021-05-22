@@ -4,23 +4,13 @@
  */
 
 import * as i2c from 'i2c-bus';
-import {
-  Gpio
-} from 'onoff';
-import {
-  PromisifiedBus
-} from 'i2c-bus';
+import {PromisifiedBus} from 'i2c-bus';
+import {Gpio} from 'onoff';
 
-import {
-  i2cBootData
-} from './bootdata';
+import {AMFEReg, FMCustomWSPData, FMFEReg, i2cBootData, WXFEReg} from './const-datas';
 
-import {
-  EliteDataMode,
-  EliteCmdCode,
-  EliteAlignMode,
-  EliteBandCode
-} from './enums';
+import {EliteAlignMode, EliteChangeBandCode, EliteCmdCode, EliteDataMode, EliteReadBandCode} from './enums';
+import {TunnerFMStatus} from './model';
 
 function clearArray(dest: number[]) {
   while (dest.length > 0) {
@@ -42,6 +32,10 @@ function sleepMs(count: number): Promise<void> {
   return new Promise<void>((resolve) => {
     setTimeout(resolve, count);
   });
+}
+
+function numberArrayToHex(data: number[]): string {
+  return Buffer.from(data).toString('hex');
 }
 
 export class Driver {
@@ -223,7 +217,7 @@ export class Driver {
       outBuffer.push(addressBuffer[2]);
       return this._i2cWrite(Buffer.from(outBuffer))
         .then(() => sleepUs(4))
-        .then((wres) => {
+        .then(() => {
           const readBuf = Buffer.alloc(40);
           return this._i2cRead(readBuf);
         })
@@ -288,27 +282,282 @@ export class Driver {
     ];
     return this.eliteCmdWriteRead(EliteCmdCode.Startup, 1, para, 1)
       .then((res) => {
-        return new Promise<void>((resolve, reject) => {
-          const startTime = process.hrtime.bigint();
-          const check = () => {
-            this.eliteCmdReadTDSR()
+        this.log('eliteCmdStartup res=' + numberArrayToHex(res));
+        return this.readyTdsr();
+      });
+  }
+
+  /**
+   * change band command
+   *
+   * @param band
+   * @param minFreq
+   * @param maxFreq
+   * @param freq
+   */
+  public eliteCmdChangeBand(band: EliteChangeBandCode, minFreq: number, maxFreq: number, freq: number) {
+    const para: number[] = [
+      0, // Para1
+      0,
+      band,
+
+      (minFreq & 0xff0000) >> 16, // Para2
+      (minFreq & 0xff00) >> 8,
+      (minFreq & 0xff),
+
+      (maxFreq & 0xff0000) >> 16, // Para3
+      (maxFreq & 0xff00) >> 8,
+      (maxFreq & 0xff),
+
+      (freq & 0xff0000) >> 16, // Para4
+      (freq & 0xff00) >> 8,
+      (freq & 0xff),
+    ];
+    return this.eliteCmdWriteRead(EliteCmdCode.ChangeBand, 4, para, 1)
+      .then((res) => {
+        this.log('eliteCmdChangeBand res=' + numberArrayToHex(res));
+        return this.readyTdsr();
+      });
+  }
+
+  public eliteCmdWriteBeCoeff(beCoeff: number[]) {
+    console.log('eliteCmdWriteBeCoeff START');
+    return new Promise<void>((resolve, reject) => {
+      let position = 0;
+      let offset = 0;
+      const next = () => {
+        if (position >= beCoeff.length) {
+          resolve();
+          return ;
+        }
+
+        const numWord = beCoeff[position];
+        let num = numWord;
+        const addrs = [
+          beCoeff[position + 1],
+          beCoeff[position + 2],
+          beCoeff[position + 3]
+        ];
+        const addrRange =
+            (addrs[0] << 16) |
+            (addrs[1] << 8) |
+            (addrs[2]);
+
+        let cmdcode: EliteCmdCode;
+
+        if ( addrRange <= 0x019fff  || (addrRange >= 0x01c000 && addrRange <= 0x01ffff )) {
+          cmdcode = EliteCmdCode.WriteDMAMem;
+        }
+        else if ( addrRange >= 0x01a000 && addrRange <= 0x01afff) {
+          cmdcode = EliteCmdCode.WriteMen;
+        }
+        else if ( addrRange >= 0x01b000 && addrRange <= 0x01bfff ) {
+          cmdcode = EliteCmdCode.WriteMen;
+        }
+
+        if (cmdcode === EliteCmdCode.WriteDMAMem) {
+          const numArr = [];
+          for (let i = 0; i < num; i++) numArr.push(i);
+
+          return numArr.reduce((prev, i) => prev.then(() => {
+            const writeBuffer = [
+              ...addrs, // Para 1 memory address
+
+              beCoeff[position + 4 + i * 4], // Para 2
+              beCoeff[position + 5 + i * 4],
+              beCoeff[position + 6 + i * 4],
+
+              beCoeff[position + 5 + i * 4], // Para 3
+              beCoeff[position + 6 + i * 4],
+              beCoeff[position + 7 + i * 4],
+            ];
+            return this.eliteCmdWriteRead(cmdcode, 3, writeBuffer, 1)
+              .then((res) => {
+                console.log(`eliteCmdWriteBeCoeff mid res 1 = ${numberArrayToHex(res)}`);
+                let tmpAddr = addrs[0];
+                tmpAddr <<= 8;
+                tmpAddr |= addrs[1];
+                tmpAddr <<= 8;
+                tmpAddr |= addrs[2];
+                tmpAddr++;
+                addrs[0] = (tmpAddr >> 16) & 0xff;
+                addrs[1] = (tmpAddr >> 8) & 0xff;
+                addrs[2] = (tmpAddr) & 0xff;
+              });
+          })
+          , Promise.resolve())
+            .then(() => {
+              position += numWord * 4 + 4;
+              next();
+            })
+            .catch((err) => reject(err));
+        } else if (cmdcode === EliteCmdCode.WriteMen) {
+          const subExec = () => {
+            const writeBuffer = [
+              ...addrs
+            ];
+            if (num <= 7) {
+              for (let i=0; i<num; i++) {
+                writeBuffer[3 + i * 3] = beCoeff[position + 4 + i * 4 + offset];
+                writeBuffer[4 + i * 3] = beCoeff[position + 5 + i * 4 + offset];
+                writeBuffer[5 + i * 3] = beCoeff[position + 6 + i * 4 + offset];
+              }
+              return this.eliteCmdWriteRead(cmdcode, num + 1, writeBuffer, 1)
+                .then((res) => {
+                  console.log(`eliteCmdWriteBeCoeff mid res 2 = ${numberArrayToHex(res)}`);
+                  position += numWord * 4 + 4;
+                  next();
+                })
+                .catch((err) => reject(err));
+            }
+            for (let i=0; i<7; i++) {
+              writeBuffer.push(beCoeff[position + 4 + i * 4 + offset]);
+              writeBuffer.push(beCoeff[position + 5 + i * 4 + offset]);
+              writeBuffer.push(beCoeff[position + 6 + i * 4 + offset]);
+            }
+            this.eliteCmdWriteRead(cmdcode, 8, writeBuffer, 1)
               .then(() => {
-                if (this._flagSeqChg) {
-                  const hrDiff = (process.hrtime.bigint() - startTime) / 1000000n;
-                  if (hrDiff >= 250n) {
-                    reject(new Error('timed out'));
-                    return ;
-                  }
-                  return sleepMs(10)
-                    .then(() => check());
-                } else {
-                  resolve();
-                }
+                num -= 7;
+                subExec();
               })
               .catch((err) => reject(err));
+            subExec();
           };
-          check();
-        });
+          subExec();
+        }
+      };
+      next();
+    });
+  }
+
+  /**
+   * Set Front-end Registers command in case customer want to change the FE registers to be different from default values
+   *
+   * @param band band
+   * @param start start
+   * @param num num
+   */
+  public eliteCmdSetFEReg(band: EliteChangeBandCode, start: number, num: number) {
+    return Promise.resolve()
+      .then(() => {
+        if (num === 0) {
+          return this.eliteCmdWriteRead(EliteCmdCode.SetFEReg, 0, [], 1);
+        } else {
+          const writeBuffer = [
+            0x00, // Para1 - subaddress
+            0x00,
+            start,
+          ];
+
+          if (start === 15) {
+            switch (band) {
+            case EliteChangeBandCode.FM:
+              writeBuffer[3] = FMFEReg[10 * 3];
+              writeBuffer[4] = FMFEReg[10 * 3 + 1];
+              writeBuffer[5] = FMFEReg[10 * 3 + 2];
+              break;
+            case EliteChangeBandCode.WB:
+              writeBuffer[3] = WXFEReg[10 * 3];
+              writeBuffer[4] = WXFEReg[10 * 3 + 1];
+              writeBuffer[5] = WXFEReg[10 * 3 + 2];
+              break;
+            default:
+              writeBuffer[3] = AMFEReg[10 * 3];
+              writeBuffer[4] = AMFEReg[10 * 3 + 1];
+              writeBuffer[5] = AMFEReg[10 * 3 + 2];
+              break;
+            }
+          }
+          else {
+            switch (band) {
+            case EliteChangeBandCode.FM:
+              for (let i=0; i<num; i++) {
+                writeBuffer[3 + i * 3] = FMFEReg[start * 3 + i * 3];
+                writeBuffer[4 + i * 3] = FMFEReg[start * 3 + i * 3 + 1];
+                writeBuffer[5 + i * 3] = FMFEReg[start * 3 + i * 3 + 2];
+              }
+              break;
+            case EliteChangeBandCode.WB:
+              for (let i=0; i<num; i++) {
+                writeBuffer[3 + i * 3] = WXFEReg[start * 3 + i * 3];
+                writeBuffer[4 + i * 3] = WXFEReg[start * 3 + i * 3 + 1];
+                writeBuffer[5 + i * 3] = WXFEReg[start * 3 + i * 3 + 2];
+              }
+              break;
+            default:
+              for (let i=0; i<num; i++) {
+                writeBuffer[3 + i * 3] = AMFEReg[start * 3 + i * 3];
+                writeBuffer[4 + i * 3] = AMFEReg[start * 3 + i * 3 + 1];
+                writeBuffer[5 + i * 3] = AMFEReg[start * 3 + i * 3 + 2];
+              }
+              break;
+            }
+          }
+
+          return this.eliteCmdWriteRead(EliteCmdCode.SetFEReg, num + 1, writeBuffer, 1);
+        }
+      })
+      .then((res) => {
+        console.log(`eliteCmdSetFEReg res = ${numberArrayToHex(res)}`);
+        return res;
+      });
+  }
+
+  public tunerChangeFMFreq(freq: number) {
+    const minFreq = 76000;
+    const maxFreq = 108000;
+    const curFreq = freq;
+
+    // optional, in case the FE registers need to be different compared to the default setting in FM band
+    return this.eliteCmdSetFEReg(EliteChangeBandCode.FM, 0,10)
+    // return this.eliteCmdSetFEReg(EliteBandCode.FM, 15, 1)
+      // set the band's range and tune to the frequency in this band as well
+      .then(() => this.eliteCmdChangeBand(EliteChangeBandCode.FM, minFreq, maxFreq, curFreq))
+
+      .then(() => this.eliteCmdWriteBeCoeff(FMCustomWSPData))
+
+      // Enable option funtion e.g. Musica
+      .then(() => this.eliteCmdMuSICA(0));
+  }
+
+  public eliteCmdMuSICA(val: number) {
+    const writeBuffer = [
+      0x00,
+      0x00,
+      val
+    ];
+    return this.eliteCmdWriteRead(EliteCmdCode.MuSICA, 1, writeBuffer, 1);
+  }
+
+  /**
+   * Tune to specific frequency command
+   *
+   * @param freq unip is khz
+   */
+  public eliteCmdChangeFreq(freq: number) {
+    const writeBuffer = [
+      (freq >> 16) & 0xff,
+      (freq >> 8) & 0xff,
+      (freq) & 0xff,
+    ];
+    return this.eliteCmdWriteRead(EliteCmdCode.ChangeFreq, 1, writeBuffer, 1)
+      .then(() => this.readyTdsr());
+  }
+
+  public eliteCmdReadTunnerStatus(band: EliteReadBandCode): Promise<TunnerFMStatus> {
+    const writeBuffer = [
+      0x00,
+      0x00,
+      band
+    ];
+    return this.eliteCmdWriteRead(EliteCmdCode.ReadTunerStatus, 1, writeBuffer, 2)
+      .then((rres) => {
+        return {
+          smeter: rres[3],
+          detuning: rres[4],
+          multipath: rres[6],
+          adjChannel: rres[7],
+        };
       });
   }
 
@@ -349,6 +598,30 @@ export class Driver {
         }
         return [];
       });
+  }
+
+  public readyTdsr() {
+    return new Promise<void>((resolve, reject) => {
+      const startTime = process.hrtime.bigint();
+      const check = () => {
+        this.eliteCmdReadTDSR()
+          .then(() => {
+            const hrDiff = (process.hrtime.bigint() - startTime) / 1000000n;
+            if (this._flagSeqChg) {
+              if (hrDiff >= 1000n) {
+                reject(new Error('timed out'));
+                return ;
+              }
+              return sleepMs(10)
+                .then(() => check());
+            } else {
+              resolve();
+            }
+          })
+          .catch((err) => reject(err));
+      };
+      check();
+    });
   }
 
   private _i2cWrite(buf: Buffer): Promise<i2c.BytesWritten> {

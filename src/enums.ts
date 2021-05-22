@@ -16,18 +16,24 @@ export enum EliteAlignMode {
   AlignVCO = 0x02 // only align
 }
 
-export enum EliteBandCode {
+export enum EliteChangeBandCode {
   FM = 0x01,
   AM_EU_JP = 0x02,
   AM_US = 0x03,
   WB = 0x04
 }
 
+export enum EliteReadBandCode {
+  FM = 0x00,
+  AM = 0x01,
+  WB = 0x02
+}
+
 export enum EliteCmdCode {
   ReadDMAMem = 0x00,
   WriteDMAMem = 0x03,
-  ReadMem = 0x1E,
-  WriteMem = 0x1F,
+  ReadMen = 0x1E,
+  WriteMen = 0x1F,
   ReadTDS = 0x11,
 
   /**
@@ -36,7 +42,7 @@ export enum EliteCmdCode {
   Startup = 0x22,
 
   /**
-   * {@link EliteBandCode}
+   * {@link EliteChangeBandCode}
    */
   ChangeBand = 0x23,
 
@@ -66,4 +72,7 @@ export enum EliteCmdCode {
   ReadSTStatus = 0x1F,
 
   SetDiss = 0x1a,
+
+  IBOC_Blaender = 0x06,
+  MuSICA = 0x20
 }
